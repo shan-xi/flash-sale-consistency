@@ -154,7 +154,7 @@ The product row is locked using:
 SELECT *
 FROM product
 WHERE id = ?
-FOR UPDATE;
+    FOR UPDATE;
 ```
 
 This is a **row-level lock**.
@@ -611,7 +611,8 @@ It may look like Redis already provides a distributed lock.
 Why do we still use:
 
 ```sql
-SELECT ... FOR UPDATE
+SELECT...FOR
+UPDATE
 ```
 
 ?
@@ -852,19 +853,19 @@ The next cache miss can repopulate Redis from PostgreSQL.
 
 # 22. Important Failure Scenarios
 
-| Scenario | Expected behavior |
-|---|---|
-| Redis healthy | Use Redisson distributed lock |
-| Redis lock contention | Do not bypass healthy Redis lock |
-| Redis unavailable | Fall back to PostgreSQL row lock |
-| Redis crashes | Purchase system continues using PostgreSQL |
-| Redis restarts | Cache may be empty |
-| Redis cache miss | Read PostgreSQL and repopulate cache |
-| Duplicate request | Idempotency prevents duplicate order |
-| Multiple JVMs | Redisson coordinates instances |
-| High DB contention | PostgreSQL row lock serializes updates |
-| DB transaction fails | Stock/order/outbox rollback together |
-| Redis delete fails | Business transaction remains successful |
+| Scenario              | Expected behavior                          |
+|-----------------------|--------------------------------------------|
+| Redis healthy         | Use Redisson distributed lock              |
+| Redis lock contention | Do not bypass healthy Redis lock           |
+| Redis unavailable     | Fall back to PostgreSQL row lock           |
+| Redis crashes         | Purchase system continues using PostgreSQL |
+| Redis restarts        | Cache may be empty                         |
+| Redis cache miss      | Read PostgreSQL and repopulate cache       |
+| Duplicate request     | Idempotency prevents duplicate order       |
+| Multiple JVMs         | Redisson coordinates instances             |
+| High DB contention    | PostgreSQL row lock serializes updates     |
+| DB transaction fails  | Stock/order/outbox rollback together       |
+| Redis delete fails    | Business transaction remains successful    |
 
 ---
 
@@ -956,4 +957,5 @@ The fundamental rule is:
 
 > **Redis improves performance. PostgreSQL guarantees correctness.**
 
-If Redis disappears, the system becomes slower under heavy contention, but it should still produce the correct inventory and orders.
+If Redis disappears, the system becomes slower under heavy contention, but it should still produce the correct inventory
+and orders.
