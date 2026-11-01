@@ -1,6 +1,5 @@
 package com.example.flashsale.bootstrap;
 
-import com.example.flashsale.cache.StockCache;
 import com.example.flashsale.domain.Product;
 import com.example.flashsale.repository.ProductRepository;
 import org.springframework.boot.CommandLineRunner;
@@ -11,28 +10,19 @@ import org.springframework.transaction.annotation.Transactional;
 public class DataInitializer implements CommandLineRunner {
 
     private final ProductRepository productRepository;
-    private final StockCache stockCache;
 
-    public DataInitializer(ProductRepository productRepository, StockCache stockCache) {
+    public DataInitializer(ProductRepository productRepository) {
         this.productRepository = productRepository;
-        this.stockCache = stockCache;
     }
 
     @Override
     @Transactional
     public void run(String... args) {
-        Product product = productRepository.findById(1L).orElse(null);
-
-        if (product == null) {
-            product = productRepository.save(
-                    new Product("iPhone 17", 100)
-            );
+        if (productRepository.findById(1L).isEmpty()) {
+            productRepository.save(new Product("iPhone 17", 100));
         }
 
-        try {
-            stockCache.set(product.getId(), product.getStock());
-        } catch (Exception ignored) {
-            // Redis may not be available at startup.
-        }
+        // Redis is a disposable cache. Do not make application startup depend
+        // on Redis being available. The first GET will warm the cache.
     }
 }

@@ -1,6 +1,6 @@
 package com.example.flashsale.service;
 
-import com.example.flashsale.cache.StockCache;
+import com.example.flashsale.cache.ProductCache;
 import com.example.flashsale.domain.OutboxEvent;
 import com.example.flashsale.repository.OutboxRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -12,16 +12,16 @@ import org.springframework.transaction.annotation.Transactional;
 public class OutboxEventProcessor {
 
     private final OutboxRepository outboxRepository;
-    private final StockCache stockCache;
+    private final ProductCache productCache;
     private final ObjectMapper objectMapper;
 
     public OutboxEventProcessor(
             OutboxRepository outboxRepository,
-            StockCache stockCache,
+            ProductCache productCache,
             ObjectMapper objectMapper
     ) {
         this.outboxRepository = outboxRepository;
-        this.stockCache = stockCache;
+        this.productCache = productCache;
         this.objectMapper = objectMapper;
     }
 
@@ -40,7 +40,7 @@ public class OutboxEventProcessor {
         // Strict: if Redis is down this throws, the transaction rolls back,
         // and the event remains PENDING for the next attempt.
         event.markAttempt();
-        stockCache.deleteOrThrow(productId);
+        productCache.deleteOrThrow(productId);
 
         event.markProcessed();
     }

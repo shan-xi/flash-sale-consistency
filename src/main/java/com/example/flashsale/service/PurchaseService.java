@@ -2,7 +2,7 @@ package com.example.flashsale.service;
 
 import com.example.flashsale.api.PurchaseRequest;
 import com.example.flashsale.api.PurchaseResponse;
-import com.example.flashsale.cache.StockCache;
+import com.example.flashsale.cache.ProductCache;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -18,20 +18,20 @@ public class PurchaseService {
     private static final Logger log = LoggerFactory.getLogger(PurchaseService.class);
 
     private final PurchaseTransactionService transactionService;
-    private final StockCache stockCache;
+    private final ProductCache productCache;
     private final RedissonClient redissonClient;
     private final long waitTimeSeconds;
     private final long leaseTimeSeconds;
 
     public PurchaseService(
             PurchaseTransactionService transactionService,
-            StockCache stockCache,
+            ProductCache productCache,
             RedissonClient redissonClient,
             @Value("${app.lock.wait-time-seconds}") long waitTimeSeconds,
             @Value("${app.lock.lease-time-seconds}") long leaseTimeSeconds
     ) {
         this.transactionService = transactionService;
-        this.stockCache = stockCache;
+        this.productCache = productCache;
         this.redissonClient = redissonClient;
         this.waitTimeSeconds = waitTimeSeconds;
         this.leaseTimeSeconds = leaseTimeSeconds;
@@ -61,7 +61,7 @@ public class PurchaseService {
             if (!lockAcquired && redisHealthy) {
                 // false means the lock is currently owned by another caller.
                 // Verify Redis is really reachable before treating this as contention.
-                redisHealthy = stockCache.ping();
+                redisHealthy = productCache.ping();
                 if (redisHealthy) {
                     throw new IllegalStateException("Could not acquire distributed lock");
                 }
@@ -77,7 +77,7 @@ public class PurchaseService {
             PurchaseResponse response = transactionService.createOrder(productId, request);
 
             // Never let Redis failure turn a committed DB transaction into an HTTP failure.
-            stockCache.deleteBestEffort(productId);
+            productCache.deleteBestEffort(productId);
             return response;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

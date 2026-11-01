@@ -2,7 +2,7 @@ package com.example.flashsale;
 
 import com.example.flashsale.api.PurchaseRequest;
 import com.example.flashsale.api.PurchaseResponse;
-import com.example.flashsale.cache.StockCache;
+import com.example.flashsale.cache.ProductCache;
 import com.example.flashsale.service.PurchaseService;
 import com.example.flashsale.service.PurchaseTransactionService;
 import org.junit.jupiter.api.Test;
@@ -21,7 +21,7 @@ class PurchaseServiceRedisFallbackTest {
     @Test
     void redisExceptionFallsBackToPostgresTransaction() throws Exception {
         PurchaseTransactionService transactionService = mock(PurchaseTransactionService.class);
-        StockCache stockCache = mock(StockCache.class);
+        ProductCache productCache = mock(ProductCache.class);
         RedissonClient redissonClient = mock(RedissonClient.class);
         RLock lock = mock(RLock.class);
 
@@ -34,32 +34,32 @@ class PurchaseServiceRedisFallbackTest {
         when(transactionService.createOrder(1L, request)).thenReturn(expected);
 
         PurchaseService service = new PurchaseService(
-                transactionService, stockCache, redissonClient, 2, 30
+                transactionService, productCache, redissonClient, 2, 30
         );
 
         assertEquals(expected, service.purchase(1L, request));
         verify(transactionService).createOrder(1L, request);
-        verify(stockCache).deleteBestEffort(1L);
+        verify(productCache).deleteBestEffort(1L);
         verify(lock, never()).unlock();
     }
 
     @Test
     void falseLockPlusRedisDownFallsBackToPostgresTransaction() throws Exception {
         PurchaseTransactionService transactionService = mock(PurchaseTransactionService.class);
-        StockCache stockCache = mock(StockCache.class);
+        ProductCache productCache = mock(ProductCache.class);
         RedissonClient redissonClient = mock(RedissonClient.class);
         RLock lock = mock(RLock.class);
 
         when(redissonClient.getLock("flash-sale:product:1:lock")).thenReturn(lock);
         when(lock.tryLock(anyLong(), anyLong(), any())).thenReturn(false);
-        when(stockCache.ping()).thenReturn(false);
+        when(productCache.ping()).thenReturn(false);
 
         PurchaseRequest request = new PurchaseRequest(1002L, 1, "request-redis-down-2");
         PurchaseResponse expected = new PurchaseResponse(124L, 1L, 1002L, 1, 98);
         when(transactionService.createOrder(1L, request)).thenReturn(expected);
 
         PurchaseService service = new PurchaseService(
-                transactionService, stockCache, redissonClient, 2, 30
+                transactionService, productCache, redissonClient, 2, 30
         );
 
         assertEquals(expected, service.purchase(1L, request));
@@ -69,16 +69,16 @@ class PurchaseServiceRedisFallbackTest {
     @Test
     void healthyRedisWithLockContentionDoesNotBypassDistributedLock() throws Exception {
         PurchaseTransactionService transactionService = mock(PurchaseTransactionService.class);
-        StockCache stockCache = mock(StockCache.class);
+        ProductCache productCache = mock(ProductCache.class);
         RedissonClient redissonClient = mock(RedissonClient.class);
         RLock lock = mock(RLock.class);
 
         when(redissonClient.getLock("flash-sale:product:1:lock")).thenReturn(lock);
         when(lock.tryLock(anyLong(), anyLong(), any())).thenReturn(false);
-        when(stockCache.ping()).thenReturn(true);
+        when(productCache.ping()).thenReturn(true);
 
         PurchaseService service = new PurchaseService(
-                transactionService, stockCache, redissonClient, 2, 30
+                transactionService, productCache, redissonClient, 2, 30
         );
 
         assertThrows(

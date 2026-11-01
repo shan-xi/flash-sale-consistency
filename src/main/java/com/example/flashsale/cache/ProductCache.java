@@ -1,65 +1,67 @@
 package com.example.flashsale.cache;
 
+import com.example.flashsale.api.ProductResponse;
 import com.example.flashsale.exception.RedisUnavailableException;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
+/**
+ * Redis is a disposable cache for the whole product read model.
+ * PostgreSQL remains the source of truth.
+ */
 @Component
-public class StockCache {
+public class ProductCache {
 
     private static final String PREFIX = "product:";
-    private static final String SUFFIX = ":stock";
+    private static final String SUFFIX = ":detail";
 
     private final StringRedisTemplate redis;
+    private final ObjectMapper objectMapper;
 
-    public StockCache(StringRedisTemplate redis) {
+    public ProductCache(StringRedisTemplate redis, ObjectMapper objectMapper) {
         this.redis = redis;
+        this.objectMapper = objectMapper;
     }
 
     public String key(Long productId) {
         return PREFIX + productId + SUFFIX;
     }
 
-    /**
-     * Cache reads are optional. A Redis failure is converted to a domain
-     * exception so callers can fall back to PostgreSQL.
-     */
-    public Integer get(Long productId) {
+    public CachedProduct get(Long productId) {
         try {
             String value = redis.opsForValue().get(key(productId));
-            return value == null ? null : Integer.valueOf(value);
+            if (value == null) {
+                return null;
+            }
+            return objectMapper.readValue(value, CachedProduct.class);
         } catch (Exception e) {
             throw new RedisUnavailableException(e);
         }
     }
 
-    /**
-     * Cache writes are optional. Never use this operation as part of the
-     * correctness path for a purchase.
-     */
-    public void set(Long productId, int stock) {
+    public void set(ProductResponse product) {
         try {
-            redis.opsForValue().set(key(productId), String.valueOf(stock));
+            String value = objectMapper.writeValueAsString(
+                    new CachedProduct(product.id(), product.name(), product.stock())
+            );
+            redis.opsForValue().set(key(product.id()), value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not serialize product cache", e);
         } catch (Exception e) {
             throw new RedisUnavailableException(e);
         }
     }
 
-    /**
-     * Best-effort invalidation for the synchronous purchase path.
-     */
     public void deleteBestEffort(Long productId) {
         try {
             deleteOrThrow(productId);
         } catch (RedisUnavailableException ignored) {
-            // PostgreSQL has already committed. Outbox/rebuild will repair Redis.
+            // PostgreSQL has already committed. The outbox retries invalidation.
         }
     }
 
-    /**
-     * Strict invalidation used by the outbox worker. The worker must NOT mark
-     * an event processed when Redis did not actually accept the invalidation.
-     */
     public void deleteOrThrow(Long productId) {
         try {
             redis.delete(key(productId));
@@ -77,5 +79,8 @@ public class StockCache {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    public record CachedProduct(Long id, String name, int stock) {
     }
 }

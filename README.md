@@ -1,707 +1,233 @@
 # Flash Sale Consistency Demo
 
-A Java/Spring Boot project demonstrating how to build a **flash-sale purchase system** that remains correct under:
+Java 21 / Spring Boot project demonstrating a flash-sale purchase system that remains correct under high concurrency,
+multiple application instances, Redis failure, duplicate requests, and cache failures.
 
-- High concurrency
-- Multiple application instances
-- Redis failure
-- Duplicate purchase requests
-- Database contention
-- Cache inconsistency
-- Distributed locking
-- Transactional event processing
+## Core design
 
-The main goal of this project is **correctness first**, while using Redis to improve performance.
-
----
-
-## 1. Architecture
+> **PostgreSQL is the source of truth. Redis is a disposable performance cache and distributed-lock mechanism.**
 
 ```text
-                         ┌──────────────────────┐
-                         │      Client          │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │ Spring Boot API      │
-                         │ Multiple Instances   │
-                         └──────────┬───────────┘
-                                    │
-                     ┌──────────────┴──────────────┐
-                     │                             │
-                     ▼                             ▼
-              ┌─────────────┐              ┌──────────────┐
-              │    Redis    │              │ PostgreSQL   │
-              │             │              │              │
-              │ Cache       │              │ Source of    │
-              │ Distributed │              │ Truth        │
-              │ Lock        │              │              │
-              └─────────────┘              └──────────────┘
-                                                   │
-                                                   │
-                                                   ▼
-                                          ┌────────────────┐
-                                          │ Transactional   │
-                                          │ Outbox          │
-                                          └────────────────┘
+                         Client
+                           |
+                           v
+                  Spring Boot instances
+                    /              \
+                   v                v
+              Redis             PostgreSQL
+          cache + lock          source of truth
+                                    |
+                                    v
+                             Transactional outbox
 ```
 
-### Core principle
-
-> **PostgreSQL is the source of truth. Redis is only a performance optimization.**
-
-Redis must never be required for business correctness.
-
----
-
-# 2. Technology Stack
+## Technology
 
 - Java 21
-- Spring Boot
-- Spring Web
+- Spring Boot 3.5
 - Spring Data JPA
 - PostgreSQL
 - Redis
 - Redisson
-- Docker / Docker Compose
-- Maven
-- JUnit
-- Testcontainers
+- Docker Compose
+- JUnit / Testcontainers
 
----
+## Read path: real Redis cache benefit
 
-# 3. Main Problem
-
-Imagine a product has:
-
-```text
-stock = 100
-```
-
-1000 users simultaneously try to purchase the product.
-
-Without proper concurrency control, multiple application instances could execute:
-
-```text
-read stock = 1
-
-User A → stock = 1
-User B → stock = 1
-
-User A → stock = 0
-User B → stock = 0
-```
-
-The system could oversell the product.
-
-We therefore need concurrency control.
-
----
-
-# 4. Distributed Lock
-
-When Redis is available, the application uses a **Redisson distributed lock**.
-
-For example:
-
-```text
-flash-sale:product:1:lock
-```
-
-The flow is:
-
-```text
-Request
-   │
-   ▼
-Redisson distributed lock
-   │
-   ▼
-PostgreSQL transaction
-   │
-   ▼
-SELECT ... FOR UPDATE
-   │
-   ▼
-Decrease stock
-   │
-   ▼
-Create order
-   │
-   ▼
-Create outbox event
-   │
-   ▼
-Commit
-```
-
-The distributed lock reduces the amount of concurrent work reaching PostgreSQL.
-
-However:
-
-> The Redis lock is not the final correctness boundary.
-
----
-
-# 5. PostgreSQL Row Lock
-
-The final correctness boundary is PostgreSQL.
-
-The product row is locked using:
-
-```sql
-SELECT *
-FROM product
-WHERE id = ?
-    FOR UPDATE;
-```
-
-This is a **row-level lock**.
-
-For example:
-
-```text
-Product 1
-──────────────
-stock = 100
-```
-
-Two transactions try to purchase at the same time.
-
-```text
-Transaction A
-    │
-    ├── SELECT ... FOR UPDATE
-    │
-    ├── locks Product 1
-    │
-    └── stock 100 → 99
-
-
-Transaction B
-    │
-    ├── SELECT ... FOR UPDATE
-    │
-    ├── waits for Transaction A
-    │
-    └── stock 99 → 98
-```
-
-Therefore the database prevents both transactions from modifying the same stock value incorrectly.
-
----
-
-# 6. What Happens When Redis Fails?
-
-This is one of the most important parts of the project.
-
-Redis is **not required for the system to continue processing purchases**.
-
-If Redis is unavailable:
-
-```text
-Request
-   │
-   ▼
-Try Redisson lock
-   │
-   ▼
-Redis unavailable
-   │
-   ▼
-Fallback
-   │
-   ▼
-PostgreSQL
-   │
-   ▼
-SELECT ... FOR UPDATE
-   │
-   ▼
-Decrease stock
-   │
-   ▼
-Create order
-   │
-   ▼
-Commit
-```
-
-The system continues working.
-
-The trade-off is performance.
-
-Without Redis:
-
-```text
-More requests
-      │
-      ▼
-PostgreSQL
-      │
-      ▼
-More row-lock contention
-```
-
-So Redis improves scalability, but PostgreSQL still guarantees correctness.
-
----
-
-# 7. Important Redis Failure Detection
-
-There is an important difference between:
-
-### Case A — Redis is healthy but another request owns the lock
-
-```text
-tryLock() = false
-
-Redis is healthy
-```
-
-This means there is real lock contention.
-
-We should **not bypass the distributed lock**.
-
-The request can be rejected or retried according to the application policy.
-
----
-
-### Case B — Redis itself is unavailable
-
-For example:
-
-```text
-tryLock()
-    ↓
-false / exception
-    ↓
-Redis health check fails
-```
-
-This means Redis is unavailable.
-
-The application falls back to PostgreSQL.
-
-```text
-Redis unavailable
-        │
-        ▼
-PostgreSQL row lock
-```
-
-This distinction is important.
-
-We must not interpret every `tryLock() == false` as "Redis is down."
-
----
-
-# 8. Redis Is a Disposable Cache
-
-This project intentionally treats Redis as a **non-persistent cache**.
-
-Redis does not contain the source-of-truth business data.
-
-If Redis crashes:
-
-```text
-Before crash:
-
-PostgreSQL
-stock = 97
-
-Redis
-product:1:stock = 97
-```
-
-After Redis restarts:
-
-```text
-PostgreSQL
-stock = 97
-
-Redis
-EMPTY
-```
-
-This is completely acceptable.
-
-The database still contains the real data.
-
----
-
-# 9. Redis Recovery
-
-Because Redis is a disposable cache, we do not need to restore Redis from persisted cache data.
-
-After Redis comes back:
-
-```text
-PostgreSQL
-stock = 96
-
-Redis
-EMPTY
-```
-
-This is simply a cache miss.
-
-The application can repopulate Redis from PostgreSQL using the normal cache-aside pattern:
+`GET /products/{id}` uses cache-aside.
 
 ```text
 GET product
-      │
-      ▼
-Check Redis
-      │
-      ├── HIT ──────► return cached value
-      │
-      ▼
-    MISS
-      │
-      ▼
-Read PostgreSQL
-      │
-      ▼
-Populate Redis
-      │
-      ▼
-Return result
+     |
+     v
+   Redis
+   /   \
+ HIT   MISS
+  |      |
+  v      v
+return PostgreSQL
+         |
+         v
+      warm Redis
+         |
+         v
+       return
 ```
 
-Therefore:
+On a Redis hit, **no PostgreSQL query is made**. Redis stores the whole product read model:
 
-> Redis recovery does not change the source of truth. PostgreSQL remains authoritative.
+```json
+{
+  "id": 1,
+  "name": "iPhone 17",
+  "stock": 99
+}
+```
 
----
+The API response includes `source` (`REDIS` or `DATABASE`) so the cache behavior is easy to observe during the demo.
 
-# 10. Cache Consistency
+### Cache-miss consistency
 
-The most important rule is:
+A cache miss reads the product with PostgreSQL `SELECT ... FOR UPDATE` and writes the snapshot to Redis while holding
+the row lock. This prevents this race:
 
 ```text
-PostgreSQL
-    ↓
-source of truth
-
-Redis
-    ↓
-cache
+GET reads DB stock 100
+        |
+        | purchase commits stock 99
+        |
+GET writes old 100 into Redis  <-- stale cache
 ```
 
-We should never make a final inventory decision based only on Redis.
+The row lock serializes the DB-to-cache copy with purchases.
 
-For example, Redis might contain:
+## Purchase path
 
 ```text
-stock = 97
+POST purchase
+      |
+      v
+Try Redisson distributed lock
+      |
+      +---- Redis healthy + lock acquired ----+
+      |                                        |
+      +---- Redis unavailable -----------------+
+                                               |
+                                               v
+                                  PostgreSQL transaction
+                                               |
+                                               v
+                                  SELECT ... FOR UPDATE
+                                               |
+                                               v
+                                        check stock
+                                               |
+                                               v
+                                      decrease stock
+                                               |
+                                               v
+                                       create order
+                                               |
+                                               v
+                                    create outbox event
+                                               |
+                                               v
+                                             COMMIT
+                                               |
+                                               v
+                                      best-effort cache delete
 ```
 
-while PostgreSQL contains:
+PostgreSQL row locking is the final correctness boundary. Redis locking reduces database contention but is not required
+for correctness.
+
+## Redis failure behavior
+
+If Redis is unavailable, the purchase path still works:
 
 ```text
-stock = 96
+Redis down
+   |
+   v
+Skip distributed lock
+   |
+   v
+PostgreSQL SELECT ... FOR UPDATE
+   |
+   v
+purchase succeeds/fails based on DB state
 ```
 
-PostgreSQL is still correct.
+The system distinguishes:
 
----
+- `tryLock() == false` + Redis healthy = real lock contention; do not bypass the lock.
+- `tryLock()` exception or `false` + Redis health check fails = Redis outage; fall back to PostgreSQL.
 
-# 11. Transactional Outbox
+Redis failures during cache delete also never turn a committed purchase into an HTTP failure. The outbox retries
+invalidation.
 
-The purchase operation modifies multiple pieces of data:
+## Redis is non-persistent
+
+This project intentionally treats Redis as a disposable cache. No Redis volume or persistence configuration is used.
+
+If Redis restarts:
 
 ```text
-Product stock
-Order
-Outbox event
+PostgreSQL: stock = 96
+Redis:      empty
 ```
 
-These must be committed atomically.
+That is not a data-loss problem. The next cache miss reads PostgreSQL and warms Redis again.
 
-The transaction is conceptually:
+The application does not depend on Redis persistence to recover business data.
+
+## Cache invalidation
+
+Every successful purchase creates an outbox event in the same PostgreSQL transaction as the stock update and order
+creation.
 
 ```text
-BEGIN
-
-SELECT product FOR UPDATE
-
-check stock
-
-decrease stock
-
-INSERT order
-
-INSERT outbox event
-
-COMMIT
+DB transaction
+  update stock
+  create order
+  create cache-invalidation outbox event
+  COMMIT
+        |
+        v
+   Outbox worker
+        |
+        v
+     Redis DEL
 ```
 
-If the transaction succeeds:
+The event contains the product ID, not an old stock snapshot. This avoids replaying stale stock values into Redis.
 
-```text
-Product updated
-Order created
-Outbox event created
+## Transactional outbox
+
+The stock update, order creation, and outbox event are atomic:
+
+```sql
+BEGIN;
+
+SELECT...FOR
+UPDATE;
+UPDATE product...;
+INSERT INTO orders...;
+INSERT INTO outbox_events...;
+
+COMMIT;
 ```
 
-If the transaction fails:
+If the transaction rolls back, all three changes roll back together.
 
-```text
-Product rollback
-Order rollback
-Outbox rollback
-```
+## Idempotency
 
-This prevents situations such as:
+`requestId` is unique in PostgreSQL. Repeating the same purchase request does not create another order.
 
-```text
-stock decreased
-but
-order was not created
-```
+The database also verifies that a reused `requestId` has the same user, product, and quantity.
 
----
+## Multiple application instances
 
-# 12. Why Use an Outbox?
-
-Suppose PostgreSQL commits successfully:
-
-```text
-stock = 96
-```
-
-but Redis is unavailable.
-
-We cannot depend on Redis at transaction time.
-
-Instead, we create an outbox event in the same PostgreSQL transaction.
-
-```text
-PostgreSQL transaction
-────────────────────────────
-
-UPDATE product
-
-INSERT order
-
-INSERT outbox_event
-
-COMMIT
-```
-
-Later, an outbox worker processes the event.
-
-This allows Redis synchronization/invalidation to happen asynchronously.
-
----
-
-# 13. Outbox Event Strategy
-
-The outbox event is used for **cache invalidation**.
-
-Conceptually:
-
-```text
-Purchase
-   │
-   ▼
-PostgreSQL transaction
-   │
-   ├── update stock
-   ├── create order
-   └── create invalidation event
-             │
-             ▼
-       transaction commits
-             │
-             ▼
-        Outbox Worker
-             │
-             ▼
-       Redis DEL cache
-```
-
-Invalidation is safer than blindly writing an old stock value into Redis.
-
-For example, an old event should not overwrite a newer cache value with stale inventory.
-
----
-
-# 14. Idempotency
-
-A client may send the same request multiple times:
-
-```text
-requestId = request-001
-```
-
-For example:
-
-```text
-Client
-   │
-   ├── request-001
-   ├── timeout
-   └── request-001 again
-```
-
-We must not create two orders.
-
-The `requestId` is therefore unique in the database.
-
-Conceptually:
-
-```text
-requestId
-    │
-    ▼
-unique constraint
-    │
-    ▼
-only one successful order
-```
-
-This protects against duplicate requests even when multiple application instances receive the same request.
-
----
-
-# 15. Multi-Instance Deployment
-
-The application is designed to run on multiple JVM instances.
-
-For example:
+The project can run as:
 
 ```text
                  Load Balancer
-                       │
-          ┌────────────┼────────────┐
-          │            │            │
-          ▼            ▼            ▼
-      Instance A   Instance B   Instance C
-          │            │            │
-          └────────────┼────────────┘
-                       │
-                ┌──────┴──────┐
-                │             │
-                ▼             ▼
-             Redis       PostgreSQL
+                 /     |     \
+                v      v      v
+             App A  App B  App C
+                \      |      /
+                 \     |     /
+                   Redis
+                     |
+                 PostgreSQL
 ```
 
-The Redisson distributed lock works across JVMs.
+A JVM-local `synchronized` lock would not coordinate App A and App B. Redisson provides the cross-instance lock.
+PostgreSQL `SELECT FOR UPDATE` still guarantees correct stock updates if Redis is unavailable.
 
-A normal Java `synchronized` block would not work here because:
+## API
 
-```text
-Instance A → JVM A lock
-Instance B → JVM B lock
-```
-
-They have different memory spaces.
-
-The distributed lock coordinates them through Redis.
-
----
-
-# 16. Why We Still Need PostgreSQL Locking
-
-It may look like Redis already provides a distributed lock.
-
-Why do we still use:
-
-```sql
-SELECT...FOR
-UPDATE
-```
-
-?
-
-Because Redis can fail.
-
-```text
-Redis
-  │
-  ├── healthy
-  │
-  └── unavailable
-```
-
-If Redis is unavailable, we still need correctness.
-
-Therefore:
-
-```text
-Redis distributed lock
-        +
-PostgreSQL row lock
-```
-
-have different responsibilities.
-
-### Redis lock
-
-Mainly:
-
-```text
-reduce contention
-reduce unnecessary concurrent work
-coordinate multiple application instances
-```
-
-### PostgreSQL row lock
-
-Mainly:
-
-```text
-final correctness boundary
-```
-
----
-
-# 17. Redis Failure Trade-Off
-
-When Redis is healthy:
-
-```text
-High concurrency
-      │
-      ▼
-Redis distributed lock
-      │
-      ▼
-fewer requests reach DB simultaneously
-      │
-      ▼
-lower DB contention
-```
-
-When Redis is down:
-
-```text
-High concurrency
-      │
-      ▼
-PostgreSQL
-      │
-      ▼
-SELECT FOR UPDATE
-      │
-      ▼
-more DB contention
-```
-
-The system is therefore:
-
-> **Degraded in performance, but not degraded in correctness.**
-
-This is a major design goal of the project.
-
----
-
-# 18. API
-
-## Get Product
+### Get product
 
 ```http
 GET /products/{productId}
@@ -713,16 +239,23 @@ Example:
 curl http://localhost:8080/products/1
 ```
 
----
+Example response from Redis:
 
-## Purchase Product
+```json
+{
+  "id": 1,
+  "name": "iPhone 17",
+  "stock": 99,
+  "source": "REDIS"
+}
+```
+
+### Purchase
 
 ```http
 POST /products/{productId}/purchase
 Content-Type: application/json
 ```
-
-Request:
 
 ```json
 {
@@ -744,66 +277,23 @@ curl -X POST http://localhost:8080/products/1/purchase \
   }'
 ```
 
-Successful response:
+## Run locally
 
-```json
-{
-  "orderId": 1,
-  "productId": 1,
-  "userId": 1001,
-  "quantity": 1,
-  "remainingStock": 99
-}
-```
-
----
-
-# 19. Running the Project
-
-## Start PostgreSQL and Redis
+Start PostgreSQL and Redis:
 
 ```bash
 docker compose up -d
 ```
 
-Check containers:
-
-```bash
-docker compose ps
-```
-
-Expected services:
-
-```text
-flash-sale-postgres
-flash-sale-redis
-```
-
----
-
-## Start Spring Boot
-
-Using Maven:
-
-```bash
-./mvnw spring-boot:run
-```
-
-Or:
+Start Spring Boot:
 
 ```bash
 mvn spring-boot:run
 ```
 
-The application runs on:
+The application runs on `http://localhost:8080`.
 
-```text
-http://localhost:8080
-```
-
----
-
-# 20. Simulate Redis Failure
+## Test Redis failure
 
 Stop Redis:
 
@@ -811,7 +301,7 @@ Stop Redis:
 docker compose stop redis
 ```
 
-Then send a purchase:
+Then purchase:
 
 ```bash
 curl -X POST http://localhost:8080/products/1/purchase \
@@ -823,139 +313,37 @@ curl -X POST http://localhost:8080/products/1/purchase \
   }'
 ```
 
-The purchase should still succeed.
+The purchase should still use PostgreSQL row locking and succeed if stock is available.
 
-The application falls back to:
-
-```text
-PostgreSQL
-    ↓
-SELECT ... FOR UPDATE
-    ↓
-decrease stock
-```
-
----
-
-# 21. Start Redis Again
+Start Redis again:
 
 ```bash
 docker compose start redis
 ```
 
-Redis starts with an empty cache because Redis is treated as a disposable cache.
+Redis starts empty. A subsequent `GET` will repopulate the product cache from PostgreSQL.
 
-The database remains authoritative.
+## Interview concepts demonstrated
 
-The next cache miss can repopulate Redis from PostgreSQL.
-
----
-
-# 22. Important Failure Scenarios
-
-| Scenario              | Expected behavior                          |
-|-----------------------|--------------------------------------------|
-| Redis healthy         | Use Redisson distributed lock              |
-| Redis lock contention | Do not bypass healthy Redis lock           |
-| Redis unavailable     | Fall back to PostgreSQL row lock           |
-| Redis crashes         | Purchase system continues using PostgreSQL |
-| Redis restarts        | Cache may be empty                         |
-| Redis cache miss      | Read PostgreSQL and repopulate cache       |
-| Duplicate request     | Idempotency prevents duplicate order       |
-| Multiple JVMs         | Redisson coordinates instances             |
-| High DB contention    | PostgreSQL row lock serializes updates     |
-| DB transaction fails  | Stock/order/outbox rollback together       |
-| Redis delete fails    | Business transaction remains successful    |
-
----
-
-# 23. What This Project Demonstrates
-
-This project is intentionally designed as a **backend system-design interview project**.
-
-Important interview topics covered:
-
-### Concurrency
-
-- Multiple threads
-- Multiple JVM instances
-- Distributed locks
-- Database row locks
-- High contention
-
-### Redis
-
+- Cache-aside pattern
+- Redis as a disposable cache
 - Distributed locking with Redisson
-- Cache-aside
-- Cache invalidation
-- Redis failure
-- Redis recovery
-- Disposable cache design
-- Why Redis should not be the source of truth
-
-### PostgreSQL
-
-- Transactions
-- `SELECT FOR UPDATE`
-- Row-level locking
-- Unique constraints
-- Source of truth
-
-### Reliability
-
+- PostgreSQL pessimistic row locking
 - Redis failure fallback
+- Multiple JVM instances
+- High-contention inventory updates
 - Idempotency
 - Transactional outbox
-- Eventual cache synchronization
+- Cache invalidation
+- Cache-miss race prevention
+- Eventual cache consistency
 
----
-
-# 24. Design Summary
-
-The most important design can be summarized as:
+## Most important rule
 
 ```text
-                    Purchase Request
-                           │
-                           ▼
-                Try Redis Distributed Lock
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-        Redis healthy              Redis down
-              │                         │
-              ▼                         ▼
-       Redisson Lock             Skip Redis Lock
-              │                         │
-              └────────────┬────────────┘
-                           ▼
-                    PostgreSQL TX
-                           │
-                           ▼
-                 SELECT FOR UPDATE
-                           │
-                           ▼
-                    Check stock
-                           │
-                           ▼
-                  Decrease stock
-                           │
-                           ▼
-                    Create order
-                           │
-                           ▼
-                 Create outbox event
-                           │
-                           ▼
-                        COMMIT
-                           │
-                           ▼
-                    Return success
+Redis improves performance.
+PostgreSQL guarantees correctness.
 ```
 
-The fundamental rule is:
-
-> **Redis improves performance. PostgreSQL guarantees correctness.**
-
-If Redis disappears, the system becomes slower under heavy contention, but it should still produce the correct inventory
-and orders.
+If Redis disappears, the application becomes less efficient under heavy contention, but the inventory and orders remain
+correct because the final business decision is always made by PostgreSQL.
