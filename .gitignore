@@ -1,0 +1,116 @@
+# =========================
+# Java / Maven
+# =========================
+
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Maven wrapper
+.mvn/wrapper/maven-wrapper.jar
+
+# =========================
+# IntelliJ IDEA
+# =========================
+
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# IntelliJ project files
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/dictionaries/
+
+# =========================
+# Eclipse
+# =========================
+
+.classpath
+.project
+.settings/
+
+# =========================
+# VS Code
+# =========================
+
+.vscode/
+
+# =========================
+# OS
+# =========================
+
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+
+# =========================
+# Logs
+# =========================
+
+*.log
+logs/
+
+# =========================
+# Spring Boot
+# =========================
+
+spring.log
+
+# =========================
+# Environment / Secrets
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# Local configuration that may contain secrets
+application-local.yml
+application-local.yaml
+application-local.properties
+
+# =========================
+# Docker
+# =========================
+
+# Don't commit local Docker volumes/data
+docker-data/
+docker-volumes/
+
+# =========================
+# PostgreSQL
+# =========================
+
+*.sql.bak
+*.dump
+
+# =========================
+# Redis
+# =========================
+
+dump.rdb
+appendonly.aof
+
+# =========================
+# Temporary files
+# =========================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# =========================
+# Test / Coverage
+# =========================
+
+coverage/
+*.exec

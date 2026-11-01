@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: flash-sale-consistency
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/flash_sale
+    username: flash
+    password: flash
+    hikari:
+      maximum-pool-size: 20
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  data:
+    redis:
+      host: ${app.redis.host}
+      port: ${app.redis.port}
+      timeout: 1s
+      connect-timeout: 1s
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+app:
+  redis:
+    host: localhost
+    port: 6379
+    connect-timeout-ms: 1000
+    command-timeout-ms: 1000
+    retry-attempts: 0
+    retry-interval-ms: 100
+  outbox:
+    fixed-delay-ms: 1000
+  cache:
+    rebuild-fixed-delay-ms: 5000
+  lock:
+    wait-time-seconds: 2
+    lease-time-seconds: 30
